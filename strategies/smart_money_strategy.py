@@ -15,12 +15,12 @@ class SmartMoneyStrategy:
     """
     
     def __init__(self, 
-                 ma_windows: List[int] = [5, 10, 20],
+                 ma_windows: List[int] = [5, 10, 20, 50, 200, 250],
                  atr_period: int = 14,
                  atr_multiplier: float = 2.0,
                  position_size: float = 0.1,
-                 support_window: int = 20,
-                 resistance_window: int = 20,
+                 support_window: int = 250,  # 年线(250日)作为支撑线
+                 resistance_window: int = 20,  # 月线(20日)作为压力线
                  support_threshold: float = 0.02,
                  resistance_threshold: float = 0.02):
         """
@@ -31,8 +31,8 @@ class SmartMoneyStrategy:
             atr_period: ATR计算周期，用于止损
             atr_multiplier: ATR乘数，用于计算止损位
             position_size: 每次交易的仓位比例
-            support_window: 支撑线检测窗口大小
-            resistance_window: 压力线检测窗口大小
+            support_window: 支撑线周期(250日年线)
+            resistance_window: 压力线周期(20日月线)
             support_threshold: 支撑位附近买入阈值（百分比）
             resistance_threshold: 压力位附近卖出阈值（百分比）
         """
@@ -67,22 +67,30 @@ class SmartMoneyStrategy:
             
         返回:
             tuple: (support_levels, resistance_levels)
+            
+        说明:
+            - 支撑位: 250日均线(年线)
+            - 压力位: 20日均线(月线)
         """
         df = data.copy()
         
-        # 识别局部最低点作为支撑位
-        df['min'] = df['low'].rolling(window=self.support_window, center=True).min()
-        support = df[df['low'] == df['min']]['low']
-        support_levels = support.groupby(level=0).first().sort_index()
+        # 计算均线
+        df['ma250'] = df['close'].rolling(window=250).mean()  # 年线作为支撑位
+        df['ma20'] = df['close'].rolling(window=20).mean()    # 月线作为压力位
         
-        # 识别局部最高点作为压力位
-        df['max'] = df['high'].rolling(window=self.resistance_window, center=True).max()
-        resistance = df[df['high'] == df['max']]['high']
-        resistance_levels = resistance.groupby(level=0).first().sort_index()
+        # 支撑位为250日均线
+        support_levels = df['ma250'].dropna()
+        
+        # 压力位为20日均线
+        resistance_levels = df['ma20'].dropna()
         
         # 存储支撑位和压力位
         self.support_levels = support_levels.tolist()
         self.resistance_levels = resistance_levels.tolist()
+        
+        # 将支撑位和压力位扩展到与输入数据相同的索引
+        support_levels = support_levels.reindex(df.index, method='ffill')
+        resistance_levels = resistance_levels.reindex(df.index, method='ffill')
         
         return support_levels, resistance_levels
         
