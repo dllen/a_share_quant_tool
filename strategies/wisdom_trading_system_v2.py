@@ -162,6 +162,21 @@ class WisdomTradingSystemV2:
             return False
         closest_resistance = min(self.resistance_levels, key=lambda x: abs(x - price))
         return abs(closest_resistance - price) / closest_resistance <= self.resistance_threshold
+        
+    def is_below_resistance_threshold(self, price: float, threshold_pct: float = 0.3) -> bool:
+        """判断价格是否跌破压力位一定比例
+        
+        参数:
+            price: 当前价格
+            threshold_pct: 跌破压力位的百分比阈值
+            
+        返回:
+            bool: 如果价格低于最近压力位的(1 - threshold_pct)倍，返回True
+        """
+        if not self.resistance_levels:
+            return False
+        closest_resistance = min(self.resistance_levels, key=lambda x: abs(x - price))
+        return price <= closest_resistance * (1 - threshold_pct)
     
     def generate_signals(self) -> pd.DataFrame:
         """
@@ -237,14 +252,20 @@ class WisdomTradingSystemV2:
                     near_support               # 接近支撑位（作为确认）
                 )
             
-            # 卖出条件：趋势转弱或接近压力位
+            # 卖出条件：趋势转弱或接近压力位或跌破压力位30%
             sell_condition = False
             if df['signal'].iloc[i-1] == 1:  # 已有仓位
+                below_resistance_threshold = self.is_below_resistance_threshold(current['close'])
                 sell_condition = (
                     current['close'] < self.trailing_stop or  # 触发止损
-                    not is_uptrend or                       # 趋势转弱
-                    (near_resistance and not price_making_new_high)  # 接近压力位且动能减弱
+                    not is_uptrend or                        # 趋势转弱
+                    (near_resistance and not price_making_new_high) or  # 接近压力位且动能减弱
+                    below_resistance_threshold               # 跌破压力位30%
                 )
+                
+                # 记录是否触发30%跌破压力位信号
+                if below_resistance_threshold:
+                    df.loc[df.index[i], 'below_resistance_threshold'] = True
             
             # 生成信号
             if buy_condition:
