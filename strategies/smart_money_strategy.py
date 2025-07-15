@@ -22,7 +22,9 @@ class SmartMoneyStrategy:
                  support_window: int = 250,  # 年线(250日)作为支撑线
                  resistance_window: int = 20,  # 月线(20日)作为压力线
                  support_threshold: float = 0.02,
-                 resistance_threshold: float = 0.02):
+                 resistance_threshold: float = 0.02,
+                 volume_ma_window: int = 20,  # 成交量均线窗口
+                 volume_spike_multiplier: float = 1.5):  # 成交量放大的倍数
         """
         初始化策略参数
         
@@ -44,11 +46,14 @@ class SmartMoneyStrategy:
         self.resistance_window = resistance_window
         self.support_threshold = support_threshold
         self.resistance_threshold = resistance_threshold
+        self.volume_ma_window = volume_ma_window
+        self.volume_spike_multiplier = volume_spike_multiplier
         self.entry_price = 0.0
         self.stop_loss = 0.0
         self.trailing_stop = 0.0
         self.support_levels = []
         self.resistance_levels = []
+        self.trend = "sideways"  # 'up', 'down', or 'sideways'
     
     def calculate_atr(self, data: pd.DataFrame) -> pd.Series:
         """计算平均真实波幅(ATR)"""
@@ -58,39 +63,51 @@ class SmartMoneyStrategy:
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return true_range.rolling(window=self.atr_period).mean()
         
-    def find_support_resistance(self, data: pd.DataFrame) -> tuple:
+    def find_support_resistance(self, data: pd.DataFrame, num_points: int = 5) -> tuple:
         """
         识别支撑位和压力位
         
         参数:
             data: 包含价格数据的DataFrame
+            num_points: 用于计算平均值的高低点数量
             
         返回:
             tuple: (support_levels, resistance_levels)
             
         说明:
-            - 支撑位: 250日均线(年线)
-            - 压力位: 20日均线(月线)
+            - 支撑位: 最近1年内几个最低点的平均值
+            - 压力位: 最近1年内几个最高点的平均值
         """
         df = data.copy()
         
-        # 计算均线
-        df['ma250'] = df['close'].rolling(window=250).mean()  # 年线作为支撑位
-        df['ma20'] = df['close'].rolling(window=20).mean()    # 月线作为压力位
+        # 确保数据按日期升序排列
+        df = df.sort_index()
         
-        # 支撑位为250日均线
-        support_levels = df['ma250'].dropna()
+        # 获取最近1年的数据
+        one_year_ago = df.index[-1] - pd.DateOffset(years=1)
+        recent_data = df[df.index >= one_year_ago]
         
-        # 压力位为20日均线
-        resistance_levels = df['ma20'].dropna()
+        if len(recent_data) < num_points:
+            # 如果没有足够的数据点，使用全局最小/最大值
+            support_level = df['low'].min()
+            resistance_level = df['high'].max()
+        else:
+            # 计算支撑位：最近1年内几个最低点的平均值
+            lowest_points = recent_data['low'].nsmallest(num_points).mean()
+            
+            # 计算压力位：最近1年内几个最高点的平均值
+            highest_points = recent_data['high'].nlargest(num_points).mean()
+            
+            support_level = lowest_points
+            resistance_level = highest_points
+        
+        # 创建与原始数据索引相同的Series
+        support_levels = pd.Series(support_level, index=df.index)
+        resistance_levels = pd.Series(resistance_level, index=df.index)
         
         # 存储支撑位和压力位
-        self.support_levels = support_levels.tolist()
-        self.resistance_levels = resistance_levels.tolist()
-        
-        # 将支撑位和压力位扩展到与输入数据相同的索引
-        support_levels = support_levels.reindex(df.index, method='ffill')
-        resistance_levels = resistance_levels.reindex(df.index, method='ffill')
+        self.support_levels = [support_level] * len(df)
+        self.resistance_levels = [resistance_level] * len(df)
         
         return support_levels, resistance_levels
         
@@ -123,6 +140,135 @@ class SmartMoneyStrategy:
         closest_resistance = min(self.resistance_levels, key=lambda x: abs(x - price))
         return price <= closest_resistance * (1 - threshold_pct)
     
+    def determine_trend(self, df: pd.DataFrame, current_idx: int, short_window: int = 20, long_window: int = 50) -> str:
+        """
+        判断当前市场趋势
+        
+        参数:
+            df: 包含价格数据的DataFrame
+            current_idx: 当前索引
+            short_window: 短期均线窗口
+            long_window: 长期均线窗口
+            
+        返回:
+            str: 'up', 'down', 或 'sideways' 表示当前趋势
+        """
+        if current_idx < long_window:
+            return 'sideways'
+            
+        # 计算均线
+        short_ma = df['close'].iloc[current_idx-short_window+1:current_idx+1].mean()
+        long_ma = df['close'].iloc[current_idx-long_window+1:current_idx+1].mean()
+        
+        # 计算价格在均线附近的波动范围
+        price_volatility = df['close'].iloc[current_idx-20:current_idx].std()
+        
+        # 判断趋势
+        if short_ma > long_ma * 1.02:  # 短期均线明显高于长期均线
+            return 'up'
+        elif short_ma < long_ma * 0.98:  # 短期均线明显低于长期均线
+            return 'down'
+        else:
+            # 如果价格波动较小，则认为是横盘
+            if price_volatility < df['close'].iloc[current_idx] * 0.01:
+                return 'sideways'
+            return 'sideways'
+            
+    def is_volume_spiking(self, df: pd.DataFrame, current_idx: int) -> bool:
+        """
+        判断成交量是否放大
+        
+        参数:
+            df: 包含成交量数据的DataFrame
+            current_idx: 当前索引
+            
+        返回:
+            bool: 如果成交量放大则返回True
+        """
+        if current_idx < self.volume_ma_window:
+            return False
+            
+        current_volume = df['volume'].iloc[current_idx]
+        volume_ma = df['volume'].iloc[current_idx-self.volume_ma_window:current_idx].mean()
+        
+        return current_volume > volume_ma * self.volume_spike_multiplier
+        
+    def is_new_1y_high(self, df: pd.DataFrame, current_idx: int, lookback_days: int = 5) -> bool:
+        """
+        判断是否创出近1年新高
+        
+        参数:
+            df: 包含价格数据的DataFrame
+            current_idx: 当前索引
+            lookback_days: 确认突破的天数
+            
+        返回:
+            bool: 如果是近1年新高则返回True
+        """
+        if current_idx < 252:  # 确保有足够的历史数据
+            return False
+            
+        # 获取近1年的最高价
+        one_year_high = df['high'].iloc[current_idx-252:current_idx].max()
+        
+        # 检查当前价格是否创新高
+        if df['close'].iloc[current_idx] < one_year_high:
+            return False
+            
+        # 确认突破：过去lookback_days内有收盘价低于一年最高价
+        for i in range(1, lookback_days + 1):
+            if current_idx - i < 0:
+                break
+            if df['close'].iloc[current_idx - i] < one_year_high:
+                return True
+                
+        return False
+        
+    def is_sideways_consolidation(self, df: pd.DataFrame, current_idx: int, window: int = 10, threshold_pct: float = 0.02) -> bool:
+        """
+        判断是否处于横盘整理状态
+        
+        参数:
+            df: 包含价格数据的DataFrame
+            current_idx: 当前索引
+            window: 观察窗口大小
+            threshold_pct: 价格波动阈值（百分比）
+            
+        返回:
+            bool: 如果处于横盘整理则返回True
+        """
+        if current_idx < window:
+            return False
+            
+        # 计算窗口内的价格范围
+        window_high = df['high'].iloc[current_idx-window:current_idx].max()
+        window_low = df['low'].iloc[current_idx-window:current_idx].min()
+        
+        # 计算价格波动范围
+        price_range = (window_high - window_low) / window_low
+        
+        return price_range <= threshold_pct
+        
+    def is_near_annual_ma(self, df: pd.DataFrame, current_idx: int, threshold_pct: float = 0.05) -> bool:
+        """
+        判断价格是否在年线附近
+        
+        参数:
+            df: 包含价格数据的DataFrame
+            current_idx: 当前索引
+            threshold_pct: 年线附近的阈值（百分比）
+            
+        返回:
+            bool: 如果在年线附近则返回True
+        """
+        if 'ma250' not in df.columns or current_idx < 250:
+            return False
+            
+        current_price = df['close'].iloc[current_idx]
+        annual_ma = df['ma250'].iloc[current_idx]
+        
+        return abs(current_price - annual_ma) / annual_ma <= threshold_pct
+    
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         生成交易信号
@@ -144,95 +290,108 @@ class SmartMoneyStrategy:
         
         # 识别支撑位和压力位
         support_levels, resistance_levels = self.find_support_resistance(df)
+        df['support'] = support_levels
+        df['resistance'] = resistance_levels
         
         # 初始化信号列
         df['signal'] = 0  # 1: 买入, -1: 卖出, 0: 持有
-        df['near_support'] = False
-        df['near_resistance'] = False
+        df['trend'] = 'sideways'  # 趋势标记
+        df['new_1y_high'] = False  # 是否创1年新高
+        df['sideways'] = False  # 是否横盘
+        df['near_annual_ma'] = False  # 是否在年线附近
         
         # 生成交易信号
         for i in range(max(self.ma_windows), len(df)):
             current = df.iloc[i]
+            prev = df.iloc[i-1] if i > 0 else current
             
-            # 获取均线值
-            ma_values = [current[f'ma{ma}'] for ma in self.ma_windows]
-
-            # 1. 首先判断均线趋势
-            # 判断均线是否形成多头排列（短期均线在长期均线之上）
-            ma_trend = all(ma_values[i] >= ma_values[i+1] for i in range(len(ma_values)-1))
-            # 判断是否处于上升趋势（价格在主要均线之上）
-            price_above_ma = current['close'] > current[f'ma{self.ma_windows[-1]}']
-            is_uptrend = ma_trend and price_above_ma
+            # 判断当前趋势
+            self.trend = self.determine_trend(df, i)
+            df.loc[df.index[i], 'trend'] = self.trend
             
-            # 2. 计算成交量指标
-            volume_ma5 = df['volume'].rolling(5).mean().iloc[i]
-            volume_increasing = current['volume'] > volume_ma5  # 成交量放大
+            # 记录特征状态
+            df.loc[df.index[i], 'new_1y_high'] = self.is_new_1y_high(df, i)
+            df.loc[df.index[i], 'sideways'] = self.is_sideways_consolidation(df, i)
+            df.loc[df.index[i], 'near_annual_ma'] = self.is_near_annual_ma(df, i)
             
-            # 3. 检查价格行为
-            prev_close = df.iloc[i-1]['close'] if i > 0 else current['close']
-            price_making_new_high = current['close'] > prev_close  # 价格创新高
+            # 检查是否接近支撑位或压力位
+            near_support = self.is_near_support(current['close'])
+            # near_resistance = self.is_near_resistance(current['close'])
             
-            # 4. 检查是否接近支撑位或压力位（仅在趋势确认后使用）
-            near_support = False
-            near_resistance = False
+            # 检查是否突破支撑位或压力位
+            break_below_support = (current['low'] < current['support']) and (prev['low'] >= prev['support'])
+            break_above_resistance = (current['high'] > current['resistance']) and (prev['high'] <= prev['resistance'])
             
-            # 更新DataFrame中的标记
-            df.loc[df.index[i], 'is_uptrend'] = is_uptrend
-            df.loc[df.index[i], 'volume_increasing'] = volume_increasing
-            df.loc[df.index[i], 'price_making_new_high'] = price_making_new_high
+            # 检查成交量是否放大
+            volume_spiking = self.is_volume_spiking(df, i)
             
-            # 只在趋势向上时检查支撑位
-            if is_uptrend:
-                near_support = self.is_near_support(current['close'])
-                near_resistance = self.is_near_resistance(current['close'])
-                df.loc[df.index[i], 'near_support'] = near_support
-                df.loc[df.index[i], 'near_resistance'] = near_resistance
+            # 生成买入信号
+            buy_signal = False
+            if self.trend == 'up':
+                # 上升趋势中，支撑位附近或突破压力位时买入
+                buy_signal = near_support or break_above_resistance
             
-            # 买入条件：首先确认上升趋势，然后检查其他条件
-            buy_condition = False
-            if is_uptrend:
-                buy_condition = (
-                    price_making_new_high and  # 价格创新高
-                    volume_increasing and      # 成交量放大
-                    near_support               # 接近支撑位（作为确认）
-                )
+            # 检查是否满足1年新高突破后横盘放量卖出条件
+            new_1y_high = self.is_new_1y_high(df, i)
+            sideways = self.is_sideways_consolidation(df, i)
+            near_annual_ma = self.is_near_annual_ma(df, i)
             
-            # 卖出条件：趋势转弱或接近压力位或跌破压力位30%
-            sell_condition = False
-            if df['signal'].iloc[i-1] == 1:  # 已有仓位
-                below_resistance_threshold = self.is_below_resistance_threshold(current['close'])
-                sell_condition = (
-                    current['close'] < self.trailing_stop or  # 触发止损
-                    not is_uptrend or                        # 趋势转弱
-                    (near_resistance and not price_making_new_high) or  # 接近压力位且动能减弱
-                    below_resistance_threshold               # 跌破压力位30%
-                )
+            # 生成卖出信号
+            sell_signal = False
+            if self.trend == 'down':
+                # 下降趋势中，跌破支撑位时卖出
+                sell_signal = break_below_support
+            elif self.trend == 'sideways':
+                # 横盘时，成交量放大时卖出
+                sell_signal = volume_spiking
                 
-                # 记录是否触发30%跌破压力位信号
-                if below_resistance_threshold:
-                    df.loc[df.index[i], 'below_resistance_threshold'] = True
+                # 1年新高后横盘放量卖出
+                if new_1y_high and sideways and volume_spiking:
+                    sell_signal = True
+                    
+            # 年线附近的买卖决策
+            if near_annual_ma:
+                if self.trend == 'up' and (near_support or break_above_resistance):
+                    # 上升趋势中，年线附近支撑位买入或突破压力位买入
+                    buy_signal = True
+                elif self.trend == 'down' and break_below_support:
+                    # 下降趋势中，年线下方支撑位跌破卖出
+                    sell_signal = True
             
-            # 生成信号
-            if buy_condition:
+            # 设置信号
+            if buy_signal:
                 df.loc[df.index[i], 'signal'] = 1
+                # 设置入场价格和初始止损
                 self.entry_price = current['close']
-                self.stop_loss = current['close'] - (self.atr_multiplier * current['atr'])
-                self.trailing_stop = self.stop_loss
-            elif sell_condition:
+                self.stop_loss = current['close'] * (1 - 0.03)  # 3% 初始止损
+                self.trailing_stop = current['close'] - self.atr_multiplier * current['atr']
+            elif sell_signal:
                 df.loc[df.index[i], 'signal'] = -1
+                # 重置交易状态
+                self.entry_price = 0.0
+                self.stop_loss = 0.0
+                self.trailing_stop = 0.0
             
-            # 更新跟踪止损
-        for i in range(1, len(df)):
-            if df['signal'].iloc[i-1] == 1:  # 持有仓位
-                current = df.iloc[i]
+            # 管理已有仓位
+            if i > 0 and df['signal'].iloc[i-1] == 1:  # 已有仓位
+                # 更新跟踪止损
+                if self.trailing_stop > 0:
+                    self.trailing_stop = max(
+                        self.trailing_stop,
+                        current['close'] - self.atr_multiplier * current['atr']
+                    )
                 
-                # 更新跟踪止损：最高价的回撤2倍ATR
-                high_since_entry = df.loc[df.index[i-1]:df.index[i], 'high'].max()
-                self.trailing_stop = max(self.trailing_stop, high_since_entry - (self.atr_multiplier * current['atr']))
-                
-                # 如果价格低于跟踪止损，平仓
-                if current['close'] < self.trailing_stop:
-                    df.loc[df.index[i], 'signal'] = -1  # 平仓
+                # 检查是否触发止损
+                if current['low'] <= self.trailing_stop or current['low'] <= self.stop_loss:
+                    df.loc[df.index[i], 'signal'] = -1
+                    # 重置交易状态
+                    self.entry_price = 0.0
+                    self.stop_loss = 0.0
+                    self.trailing_stop = 0.0
+            
+            # 如果当前没有信号，保持之前的信号
+            if df.loc[df.index[i], 'signal'] == 0 and i > 0:
+                df.loc[df.index[i], 'signal'] = df.loc[df.index[i-1], 'signal']
         
         return df
     
