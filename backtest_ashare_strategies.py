@@ -3,15 +3,16 @@ Backtest Grid Trading and Turtle Trading Strategies on A-Share Market Data
 """
 import os
 import sys
-import pandas as pd
+
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # Add the project root to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.ashare_loader import AShareDataLoader
-from strategies.turtle_trading_strategy import TurtleTradingStrategy
 from strategies.grid_trading_strategy import GridTradingStrategy
+from strategies.turtle_trading_strategy import TurtleTradingStrategy
 
 
 def run_backtest(strategy_name: str, data: pd.DataFrame, params: dict) -> dict:
@@ -167,7 +168,7 @@ def plot_results(strategy_name: str, data: pd.DataFrame, results: dict):
     plt.show()
 
 
-def test_ashare_strategies(symbol: str = 'sh600000', 
+def test_ashare_strategies(symbol: str = '600000', 
                           start_date: str = '20220101', 
                           end_date: str = '20231231'):
     """
@@ -239,7 +240,7 @@ def test_ashare_strategies(symbol: str = 'sh600000',
 if __name__ == "__main__":
     # Example usage
     test_ashare_strategies(
-        symbol='sh600000',  # 浦发银行
-        start_date='20220101',
-        end_date='20231231'
+        symbol='300487',
+        start_date='20240101',
+        end_date='20250714'
     )
