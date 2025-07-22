@@ -720,17 +720,15 @@ def check_financial_conditions(fin_data, stock_code):
                 print(f"{stock_code}: 没有足够的ROE数据点")
                 return False
                 
-            # 检查ROE是否都≥15%
-            for i, roe in enumerate(roe_values[:3]):  # 最多检查前三年
+            # 检查最近3年ROE是否都>12%
+            if len(roe_values) < 3:
+                print(f"{stock_code}: 不足3年ROE数据")
+                return False
+                
+            for i, roe in enumerate(roe_values[:3]):  # 检查最近3年
                 roe_float = float(str(roe).replace('%', '').strip())
-                if roe_float < 15:
-                    print(f"{stock_code}: 第{i+1}年ROE {roe_float}% 不满足≥15%")
-                    return False
-            
-            # 检查ROE是否都≥15%
-            for i, roe in enumerate(roe_values):
-                if roe < 15:
-                    print(f"{stock_code}: 第{i+1}年ROE {roe}% 不满足≥15%")
+                if roe_float <= 12:  # 修改为>12%
+                    print(f"{stock_code}: 第{i+1}年ROE {roe_float}% 不满足>12%")
                     return False
             
             print(f"{stock_code}: 最近{len(roe_values)}年ROE均≥15%: {roe_values}")
@@ -972,3 +970,4 @@ def test_single_stock(stock_code):
 if __name__ == "__main__":
     # 测试特定股票
     test_single_stock("600004")  # 白云机场
+    # screen_stocks()
