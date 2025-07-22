@@ -72,7 +72,7 @@ def get_financial_indicators(stock_code):
         """尝试从东方财富获取财务数据"""
         try:
             print(f"{stock_code}: 尝试从东方财富获取财务指标...")
-            data = ak.stock_financial_analysis_indicator(stock=stock_code)
+            data = ak.stock_financial_analysis_indicator(symbol=stock_code)
             if not data.empty:
                 print(f"{stock_code}: 成功从东方财富获取财务指标，形状: {data.shape}")
                 print(f"可用列: {data.columns.tolist()}")
