@@ -281,27 +281,100 @@ def fetch_stock_data(stock_code: str, n_years: int = 5):
     return None
 
 def get_stock_price(stock_code: str) -> float:
-    """Get current stock price using akshare."""
+    """
+    获取股票当前价格，支持多种数据源和错误处理
+    
+    Args:
+        stock_code: 6位股票代码，例如 '600519'
+        
+    Returns:
+        float: 当前股票价格（元）
+    """
+    if not stock_code or not isinstance(stock_code, str) or not stock_code.isdigit() or len(stock_code) != 6:
+        print(f"错误: 股票代码 {stock_code} 格式不正确，应为6位数字")
+        return _get_manual_price()
+    
+    # 尝试多个数据源
+    price_sources = [
+        _get_price_from_spot,
+        _get_price_from_hist,
+        _get_price_from_sina
+    ]
+    
+    for source in price_sources:
+        try:
+            price = source(stock_code)
+            if price and price > 0:
+                return price
+        except Exception as e:
+            print(f"从 {source.__name__} 获取价格时出错: {e}")
+            continue
+    
+    print("所有数据源获取失败，请手动输入价格")
+    return _get_manual_price()
+
+def _get_price_from_spot(stock_code: str) -> float:
+    """从实时行情获取价格"""
     try:
-        # Try to get real-time data first
         stock_zh_a_spot = ak.stock_zh_a_spot()
-        stock_data = stock_zh_a_spot[stock_zh_a_spot['代码'] == stock_code]
+        if stock_zh_a_spot is None or stock_zh_a_spot.empty:
+            return 0
+            
+        # 确保股票代码是6位字符串
+        stock_code_str = stock_code.zfill(6)
+        stock_data = stock_zh_a_spot[stock_zh_a_spot['代码'] == stock_code_str]
         
         if not stock_data.empty and '最新价' in stock_data.columns:
-            return float(stock_data['最新价'].iloc[0])
-            
-        # Fallback to historical data if real-time fails
-        hist_data = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
-        if not hist_data.empty and '收盘' in hist_data.columns:
-            return float(hist_data['收盘'].iloc[-1])
-            
+            price = float(stock_data['最新价'].iloc[0])
+            if price > 0:
+                print(f"从实时行情获取到价格: {price:.2f} 元")
+                return price
     except Exception as e:
-        print(f"获取股票价格时出错: {e}")
-    
-    print("无法获取股票价格，请手动输入当前价格:")
+        print(f"实时行情接口异常: {e}")
+    return 0
+
+def _get_price_from_hist(stock_code: str) -> float:
+    """从历史数据获取最新收盘价"""
+    try:
+        hist_data = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq", count=5)
+        if hist_data is None or hist_data.empty or '收盘' not in hist_data.columns:
+            return 0
+            
+        latest_close = float(hist_data['收盘'].iloc[-1])
+        if latest_close > 0:
+            print(f"从历史数据获取到最新收盘价: {latest_close:.2f} 元")
+            return latest_close
+    except Exception as e:
+        print(f"历史数据接口异常: {e}")
+    return 0
+
+def _get_price_from_sina(stock_code: str) -> float:
+    """从新浪财经获取实时价格"""
+    try:
+        # 新浪接口需要添加市场前缀
+        prefix = 'sh' if stock_code.startswith(('6', '9')) else 'sz'
+        df = ak.stock_zh_a_spot_em()
+        if df is None or df.empty:
+            return 0
+            
+        stock_row = df[df['代码'] == f"{prefix}{stock_code}"]
+        if not stock_row.empty and '最新价' in stock_row.columns:
+            price = float(stock_row['最新价'].iloc[0])
+            if price > 0:
+                print(f"从新浪财经获取到价格: {price:.2f} 元")
+                return price
+    except Exception as e:
+        print(f"新浪财经接口异常: {e}")
+    return 0
+
+def _get_manual_price() -> float:
+    """手动输入股票价格"""
     while True:
         try:
-            return float(input("当前价格 (元): "))
+            price = float(input("请手动输入当前股票价格 (元): "))
+            if price > 0:
+                return price
+            print("价格必须大于0")
         except ValueError:
             print("请输入有效的数字")
 
